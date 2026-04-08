@@ -2,14 +2,13 @@ import os
 import json
 import time
 from datetime import datetime
-from flask import Flask, jsonify, Response
+from flask import Flask, jsonify
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
 
 app = Flask(__name__)
 
@@ -17,15 +16,15 @@ app = Flask(__name__)
 # CONFIGURACIÓN
 # ─────────────────────────────────────────────
 URL_BASE = "https://tv.senado.cl/tvsenado/site/tax/port/all/taxport_7_41__1.html"
-FECHA_LIMITE = datetime(2026, 1, 1)          # Scraping desde esta fecha en adelante
-ARCHIVO_PROGRESO = "/tmp/senado_progreso.json"  # Persiste entre reintentos en la misma instancia
-SCROLL_PAUSA = 4        # Segundos de espera tras cada scroll
-TIMEOUT_PAGINA = 8      # Segundos de espera máxima para elementos en página de sesión
-MAX_RONDAS_SIN_NUEVOS = 3  # Cuántas rondas sin artículos nuevos antes de considerar el fin
+FECHA_LIMITE = datetime(2026, 1, 1)
+ARCHIVO_PROGRESO = "/tmp/senado_progreso.json"
+SCROLL_PAUSA = 4
+TIMEOUT_PAGINA = 8
+MAX_RONDAS_SIN_NUEVOS = 3
 
 
 # ─────────────────────────────────────────────
-# DRIVER
+# DRIVER — usa el chromedriver del sistema (imagen selenium/standalone-chrome)
 # ─────────────────────────────────────────────
 def configurar_driver():
     chrome_options = Options()
@@ -40,7 +39,11 @@ def configurar_driver():
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     )
-    service = Service(ChromeDriverManager().install())
+
+    # Rutas fijas de la imagen selenium/standalone-chrome
+    chrome_options.binary_location = "/usr/bin/google-chrome"
+    service = Service("/usr/bin/chromedriver")
+
     return webdriver.Chrome(service=service, options=chrome_options)
 
 
@@ -48,12 +51,11 @@ def configurar_driver():
 # PERSISTENCIA DE PROGRESO
 # ─────────────────────────────────────────────
 def cargar_progreso():
-    """Carga el archivo de progreso si existe (para reanudar tras un fallo)."""
     if os.path.exists(ARCHIVO_PROGRESO):
         try:
             with open(ARCHIVO_PROGRESO, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            print(f"📂 Progreso anterior encontrado: {len(data['datos'])} sesiones ya extraídas.", flush=True)
+            print(f"📂 Progreso encontrado: {len(data['datos'])} sesiones ya extraídas.", flush=True)
             return data["datos"], set(data["procesados"])
         except Exception as e:
             print(f"⚠️ No se pudo leer el progreso anterior: {e}", flush=True)
@@ -61,11 +63,14 @@ def cargar_progreso():
 
 
 def guardar_progreso(datos, procesados):
-    """Guarda progreso incremental en disco."""
     try:
         with open(ARCHIVO_PROGRESO, "w", encoding="utf-8") as f:
             json.dump(
-                {"datos": datos, "procesados": list(procesados), "ultima_actualizacion": datetime.now().isoformat()},
+                {
+                    "datos": datos,
+                    "procesados": list(procesados),
+                    "ultima_actualizacion": datetime.now().isoformat()
+                },
                 f,
                 ensure_ascii=False,
                 indent=2
@@ -78,21 +83,18 @@ def guardar_progreso(datos, procesados):
 # EXTRACCIÓN DEL LINK DE VIDEO
 # ─────────────────────────────────────────────
 def extraer_url_video(driver, url_sesion):
-    """Abre la página de una sesión en una nueva pestaña y extrae el enlace MP4."""
     url_video = "No encontrado"
     try:
         driver.execute_script(f"window.open('{url_sesion}', '_blank');")
         driver.switch_to.window(driver.window_handles[1])
 
         try:
-            # Selector 1: botón de descarga directo
             wait = WebDriverWait(driver, TIMEOUT_PAGINA)
             link_mp4 = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "a.downloadVideo")))
             url_video = link_mp4.get_attribute("href")
             print(f"   ✅ MP4 vía botón de descarga", flush=True)
         except Exception:
             try:
-                # Selector 2: buscar cualquier <a> cuyo href termine en .mp4
                 links = driver.find_elements(By.TAG_NAME, "a")
                 for link in links:
                     href = link.get_attribute("href") or ""
@@ -105,19 +107,17 @@ def extraer_url_video(driver, url_sesion):
 
             if url_video == "No encontrado":
                 try:
-                    # Selector 3: etiqueta <source> dentro de <video>
                     source = driver.find_element(By.CSS_SELECTOR, "video source")
                     src = source.get_attribute("src") or ""
                     if src.endswith(".mp4"):
                         url_video = src
                         print(f"   ✅ MP4 vía etiqueta <source>", flush=True)
                 except Exception:
-                    print(f"   ⚠️ No se encontró enlace de video en esta sesión.", flush=True)
+                    print(f"   ⚠️ Sin enlace de video en esta sesión.", flush=True)
 
     except Exception as e:
-        print(f"   ❌ Error abriendo pestaña de sesión: {e}", flush=True)
+        print(f"   ❌ Error abriendo pestaña: {e}", flush=True)
     finally:
-        # Siempre cerrar la pestaña extra y volver a la principal
         try:
             if len(driver.window_handles) > 1:
                 driver.close()
@@ -136,7 +136,7 @@ def ejecutar_scraper():
     driver = configurar_driver()
 
     try:
-        print(f"🌐 Abriendo página principal: {URL_BASE}", flush=True)
+        print(f"🌐 Abriendo {URL_BASE}", flush=True)
         driver.get(URL_BASE)
         time.sleep(3)
 
@@ -145,42 +145,37 @@ def ejecutar_scraper():
         continuar = True
 
         while continuar:
-            print(f"\n🔄 Ronda #{ronda} — artículos procesados hasta ahora: {len(datos_extraidos)}", flush=True)
-
+            print(f"\n🔄 Ronda #{ronda} — sesiones acumuladas: {len(datos_extraidos)}", flush=True)
             articulos = driver.find_elements(By.CSS_SELECTOR, "article.col.span_1_of_4.article")
-            print(f"🔎 Artículos visibles en pantalla: {len(articulos)}", flush=True)
+            print(f"🔎 Artículos visibles: {len(articulos)}", flush=True)
 
             nuevos_en_ronda = 0
 
             for art in articulos:
                 try:
-                    # ── Obtener URL de la sesión ──
                     link_element = art.find_element(By.CSS_SELECTOR, ".text a")
                     url_sesion = link_element.get_attribute("href")
 
                     if not url_sesion or url_sesion in procesados:
                         continue
 
-                    # ── Obtener fecha ──
+                    # Parsear fecha
                     try:
                         fecha_str = art.find_element(By.CSS_SELECTOR, ".date").text.strip()
                         fecha_dt = datetime.strptime(fecha_str, "%d/%m/%Y")
                     except Exception:
-                        # Intentar formato alternativo dd-mm-yyyy
                         try:
                             fecha_str = art.find_element(By.CSS_SELECTOR, ".date").text.strip()
                             fecha_dt = datetime.strptime(fecha_str, "%d-%m-%Y")
                         except Exception as e_fecha:
-                            print(f"   ⚠️ No se pudo parsear la fecha: {e_fecha}", flush=True)
+                            print(f"   ⚠️ Fecha no parseable: {e_fecha}", flush=True)
                             continue
 
-                    # ── Filtro de fecha ──
                     if fecha_dt < FECHA_LIMITE:
                         print(f"🛑 Fecha límite alcanzada ({fecha_str}). Deteniendo.", flush=True)
                         continuar = False
                         break
 
-                    # ── Nombre de la comisión ──
                     try:
                         nombre_comision = art.find_element(By.CSS_SELECTOR, ".title").text.strip()
                     except Exception:
@@ -188,10 +183,8 @@ def ejecutar_scraper():
 
                     print(f"▶️  {nombre_comision} | {fecha_str}", flush=True)
 
-                    # ── Extraer URL del video ──
                     url_video = extraer_url_video(driver, url_sesion)
 
-                    # ── Registrar y guardar inmediatamente ──
                     procesados.add(url_sesion)
                     datos_extraidos.append({
                         "comision": nombre_comision,
@@ -200,13 +193,10 @@ def ejecutar_scraper():
                         "url_video": url_video
                     })
                     nuevos_en_ronda += 1
-
-                    # Guardado incremental: cada nuevo registro se persiste
                     guardar_progreso(datos_extraidos, procesados)
 
                 except Exception as e:
-                    print(f"❌ Error procesando artículo: {e}", flush=True)
-                    # Asegurarse de volver a la pestaña principal si algo salió mal
+                    print(f"❌ Error en artículo: {e}", flush=True)
                     try:
                         if len(driver.window_handles) > 1:
                             driver.switch_to.window(driver.window_handles[1])
@@ -219,17 +209,16 @@ def ejecutar_scraper():
             if not continuar:
                 break
 
-            # ── Scroll para cargar más artículos ──
             if nuevos_en_ronda == 0:
                 rondas_sin_nuevos += 1
-                print(f"⏸️  Sin artículos nuevos — intento {rondas_sin_nuevos}/{MAX_RONDAS_SIN_NUEVOS}", flush=True)
+                print(f"⏸️  Sin nuevos — intento {rondas_sin_nuevos}/{MAX_RONDAS_SIN_NUEVOS}", flush=True)
                 if rondas_sin_nuevos >= MAX_RONDAS_SIN_NUEVOS:
-                    print("🏁 Fin de página detectado. Scraping completo.", flush=True)
+                    print("🏁 Fin de página. Scraping completo.", flush=True)
                     break
             else:
                 rondas_sin_nuevos = 0
 
-            print("⏬ Haciendo scroll hacia abajo...", flush=True)
+            print("⏬ Scroll...", flush=True)
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
             time.sleep(SCROLL_PAUSA)
             ronda += 1
@@ -239,7 +228,7 @@ def ejecutar_scraper():
         raise
     finally:
         driver.quit()
-        print(f"\n🎉 Scraping finalizado. Total de sesiones: {len(datos_extraidos)}", flush=True)
+        print(f"\n🎉 Total sesiones extraídas: {len(datos_extraidos)}", flush=True)
 
     return datos_extraidos
 
@@ -249,8 +238,7 @@ def ejecutar_scraper():
 # ─────────────────────────────────────────────
 @app.route("/", methods=["GET"])
 def iniciar_scraper():
-    """Inicia el scraping completo y devuelve los resultados al terminar."""
-    print("🚀 Iniciando scraper del Senado...", flush=True)
+    print("🚀 Iniciando scraper...", flush=True)
     try:
         datos = ejecutar_scraper()
         return jsonify({
@@ -264,29 +252,25 @@ def iniciar_scraper():
 
 @app.route("/progreso", methods=["GET"])
 def ver_progreso():
-    """Devuelve el estado del progreso guardado sin lanzar un nuevo scraping."""
-    datos, procesados = cargar_progreso()
+    datos, _ = cargar_progreso()
     if not datos:
         return jsonify({"status": "Sin progreso guardado"}), 404
     return jsonify({
         "status": "Progreso parcial",
         "total_sesiones": len(datos),
-        "ultima_url": datos[-1]["url_pagina"] if datos else None,
+        "ultima_sesion": datos[-1] if datos else None,
         "datos": datos
     }), 200
 
 
 @app.route("/limpiar", methods=["GET"])
 def limpiar_progreso():
-    """Elimina el archivo de progreso para empezar desde cero."""
     if os.path.exists(ARCHIVO_PROGRESO):
         os.remove(ARCHIVO_PROGRESO)
-        return jsonify({"status": "Progreso eliminado. Próximo scraping empezará desde cero."}), 200
+        return jsonify({"status": "Progreso eliminado. Próximo scraping desde cero."}), 200
     return jsonify({"status": "No había progreso guardado."}), 200
 
 
-# ─────────────────────────────────────────────
-# ENTRADA
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
